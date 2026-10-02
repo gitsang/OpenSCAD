@@ -34,6 +34,7 @@ os.makedirs(TMP, exist_ok=True)
 
 QUICK = "--quick" in sys.argv
 MAKE_PNG = "--png" in sys.argv
+CGAL_BAD = []          # 出现过 CGAL 异常的 part (布尔运算不可信)
 
 # --- 报告同时写一份 UTF-8 文本: PowerShell 的 `>` 会写成 UTF-16, 外面读不了 ---
 REPORT = os.path.join(HERE, "_report.txt")
@@ -82,6 +83,11 @@ def run(part="all", probe_part=None, probe_box=None, out=None, extra=()):
     """跑一次 openscad, 返回它的 stdout+stderr 文本。"""
     if out is None:
         out = os.path.join(TMP, "tmp.stl")
+    # ★ 先删掉旧文件: 否则 "渲染没写出 STL" 会被上一次的旧结果冒充
+    try:
+        os.remove(out)
+    except OSError:
+        pass
     cmd = [OPENSCAD, "-o", out, "--export-format", "binstl"]
     for e in extra:
         cmd += ["-D", e]
@@ -94,14 +100,21 @@ def run(part="all", probe_part=None, probe_box=None, out=None, extra=()):
     p = subprocess.run(cmd, cwd=HERE, capture_output=True)
     txt = (p.stdout + p.stderr).decode("utf-8", "replace")
     bad = [l for l in txt.splitlines()
-           if ("ERROR" in l or "WARNING" in l) and "CHECK|" not in l]
+           if ("ERROR" in l or "WARNING" in l) and "CHECK|" not in l
+           and "2-manifold" not in l]
     for l in bad:
         print("      ! " + l.strip())
+    if "CGAL error" in txt or "assertion" in txt.lower():
+        CGAL_BAD.append(part)
+        print("      !! CGAL 异常 (布尔运算可能不可靠): %s" % part)
     return txt
 
 
 def measure(path):
-    """binary STL -> (体积, bbox_min, bbox_max, 三角面数)"""
+    """binary STL -> (体积, bbox_min, bbox_max, 三角面数)
+       ★ 文件不存在 = 布尔求交结果为空 (OpenSCAD 不写空 STL), 体积记 0"""
+    if not os.path.exists(path):
+        return 0.0, np.zeros(3), np.zeros(3), 0
     data = open(path, "rb").read()
     if len(data) < 84:
         return 0.0, np.zeros(3), np.zeros(3), 0
@@ -125,7 +138,9 @@ def export(part, tag=None, extra=()):
 
 # 大装配体导出: 只用【包围盒】结论, 所以换成 SIMPLE 截面 —— 它是真模型的超集,
 # bbox 完全一致, 但 CGAL 快很多 (详细 2020/3030 轮廓会让 STL 导出几十倍变慢)
+# 再加上关掉 400 孔洞洞板: 它对整台包围盒没有贡献, 且单独在 [7] 里验过
 SIMPLE_X = ("SIMPLE=true",)
+BENCH_X = ("SIMPLE=true", "PEGBOARD_ON=false")
 
 
 def probe(part, box, tag, simple=True):
@@ -180,7 +195,7 @@ PEG_NX, PEG_NZ, PEG_T, PEG_H, PEG_W, PEG_Z0 = [float(x) for x in C["PEG"]]
  BOT_T, COR20, DRW_FCLR) = [float(x) for x in C["DRW"]]
 ZF = [float(x) for x in C["DRWZ"][:3]]          # 三层面板下沿
 ZB = [float(x) for x in C["DRWZ"][3:]]          # 三个 2020 框下沿
-CAB_X0, CAB_X1, CAB_Z0, E20 = [float(x) for x in C["X20"]]
+CAB_X0, CAB_X1, CAB_Z0, E20, DRW_Y0 = [float(x) for x in C["X20"]]
 A20 = float(C["A20"][0])
 L20 = float(C["L20"][0])
 (CAST_H, CAST_PL, CAST_BS, CAST_BD, CAST_W, CAST_T) = [float(x) for x in C["CAST"]]
@@ -267,7 +282,7 @@ chk("立柱下端面 z = %.0f = 福马轮顶面 (型材确实截短了)" % Z_BOT
 
 # ---------------------------------------------------------------- 3
 print("\n[3] 整台包围盒")
-v, mn, mx, nf = measure(export("bench", extra=SIMPLE_X))
+v, mn, mx, nf = measure(export("bench", extra=BENCH_X))
 chk("工作台 bbox = %.0f x %.0f(含拉手 %.0f) x %.0f" % (W, D + HANDLE_OUT, HANDLE_OUT, H),
     np.allclose(mx - mn, [W, D + HANDLE_OUT, H], atol=0.02),
     "实测 %.1f x %.1f x %.1f" % tuple(mx - mn))
@@ -479,6 +494,8 @@ print("结果: %d / %d 通过" % (ok, len(_RESULT)))
 for nm, r in _RESULT:
     if not r:
         print("   FAIL: " + nm)
+if CGAL_BAD:
+    print("   ⚠ 以下 part 出现过 CGAL 异常, 结果不可信: %s" % sorted(set(CGAL_BAD)))
 print("=" * 74)
 
 if MAKE_PNG:
