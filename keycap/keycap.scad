@@ -21,6 +21,7 @@ WALL   = 1.4;    // 侧壁厚 (= 未扣凹坑时的顶板厚)
 R_BOT  = 1.9;    // 底面圆角 (顶面圆角 = R_BOT*TOP_W/BOT_W ≈ 2.19)
 DISH   = 0.30;   // 顶面指窝深
 R_SPH  = 60.0;   // 指窝球面半径
+DISH_FN = 32;    // 指窝球面细分 (只有 Ø12 的浅坑, 32 足够; 64 会让 CGAL 慢 4 倍)
 
 /* ----------------------------- 底面接口 ----------------------------- */
 HOOK_X    = 4.4; // 卡勾中心 +/-x
@@ -69,8 +70,10 @@ module cavity() {                      // 内腔 (向下多切 0.5, 避免与底
         frustum(2 * h_in(-over), 2 * h_in(CAV_H), CAV_H + over, R_CAV);
 }
 
-module dish() {                        // 顶面指窝
-    translate([0, 0, H + R_SPH - DISH]) sphere(r = R_SPH);
+module dish() {                        // 顶面指窝：用垂直缩放的浅球冠实现
+    translate([0, 0, H])
+        scale([1, 1, DISH / R_SPH])
+            sphere(r = R_SPH, $fn = DISH_FN);
 }
 
 module pad_pocket() {                  // 橡胶碗定位坑
