@@ -125,6 +125,9 @@ SIMPLE = false;
 SHOW_ENCLOSURE = true;
 ENC_W = 460;  ENC_D = 520;  ENC_H = 460;
 
+/* --- 自检加速: 关掉 400 孔的洞洞板 (它对整台包围盒没贡献), 正常别关 --- */
+PEGBOARD_ON = true;
+
 /* --- 颜色 --- */
 C_AL    = [0.78, 0.79, 0.82];
 C_WOOD  = [0.72, 0.55, 0.34];
@@ -464,7 +467,7 @@ module bench() {
     desks();
     bottom_panel();
     divider_panel();
-    pegboard();
+    if (PEGBOARD_ON) pegboard();
     ledges();
     cabinet();
     casters();
@@ -613,7 +616,7 @@ echo(str("CHECK|DRW|", N_DRAWER, "|", DRW_W, "|", DRW_GAP, "|", DRW_BW, "|",
          BOT_T, "|", COR20, "|", DRW_FCLR));
 echo(str("CHECK|DRWZ|", drw_zf(0), "|", drw_zf(1), "|", drw_zf(2), "|",
          drw_zb(0), "|", drw_zb(1), "|", drw_zb(2)));
-echo(str("CHECK|X20|", CAB_X0, "|", CAB_X1, "|", CAB_Z0, "|", E20));
+echo(str("CHECK|X20|", CAB_X0, "|", CAB_X1, "|", CAB_Z0, "|", E20, "|", DRW_Y0));
 echo(str("CHECK|A20|", A20));
 echo(str("CHECK|L20|", L20_TOTAL));
 echo(str("CHECK|CAST|", CASTER_H, "|", CASTER_PL, "|", CASTER_BS, "|",

@@ -34,6 +34,32 @@ os.makedirs(TMP, exist_ok=True)
 
 QUICK = "--quick" in sys.argv
 MAKE_PNG = "--png" in sys.argv
+CGAL_BAD = []          # 出现过 CGAL 异常的 part (布尔运算不可信)
+
+# --- 报告同时写一份 UTF-8 文本: PowerShell 的 `>` 会写成 UTF-16, 外面读不了 ---
+REPORT = os.path.join(HERE, "_report.txt")
+
+
+class _Tee(object):
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for f in self.streams:
+            f.write(s)
+        return len(s)
+
+    def flush(self):
+        for f in self.streams:
+            f.flush()
+
+
+try:
+    _rf = open(REPORT, "w", encoding="utf-8", buffering=1)
+    sys.stdout = _Tee(sys.stdout, _rf)
+    sys.stderr = _Tee(sys.stderr, _rf)
+except OSError:
+    pass
 
 # ---------------------------------------------------------------- 工具
 _RESULT = []
@@ -57,6 +83,11 @@ def run(part="all", probe_part=None, probe_box=None, out=None, extra=()):
     """跑一次 openscad, 返回它的 stdout+stderr 文本。"""
     if out is None:
         out = os.path.join(TMP, "tmp.stl")
+    # ★ 先删掉旧文件: 否则 "这次没写出 STL" 会被上一次的旧结果冒充
+    try:
+        os.remove(out)
+    except OSError:
+        pass
     cmd = [OPENSCAD, "-o", out, "--export-format", "binstl"]
     for e in extra:
         cmd += ["-D", e]
@@ -69,14 +100,21 @@ def run(part="all", probe_part=None, probe_box=None, out=None, extra=()):
     p = subprocess.run(cmd, cwd=HERE, capture_output=True)
     txt = (p.stdout + p.stderr).decode("utf-8", "replace")
     bad = [l for l in txt.splitlines()
-           if ("ERROR" in l or "WARNING" in l) and "CHECK|" not in l]
+           if ("ERROR" in l or "WARNING" in l) and "CHECK|" not in l
+           and "2-manifold" not in l]
     for l in bad:
         print("      ! " + l.strip())
+    if "CGAL error" in txt or "assertion" in txt.lower():
+        CGAL_BAD.append(part)
+        print("      !! CGAL 异常 (布尔运算可能不可靠): %s" % part)
     return txt
 
 
 def measure(path):
-    """binary STL -> (体积, bbox_min, bbox_max, 三角面数)"""
+    """binary STL -> (体积, bbox_min, bbox_max, 三角面数)
+       ★ 文件不存在 = 布尔求交结果为空 (OpenSCAD 不写空 STL), 体积记 0"""
+    if not os.path.exists(path):
+        return 0.0, np.zeros(3), np.zeros(3), 0
     data = open(path, "rb").read()
     if len(data) < 84:
         return 0.0, np.zeros(3), np.zeros(3), 0
@@ -96,6 +134,13 @@ def export(part, tag=None, extra=()):
     out = os.path.join(TMP, "%s.stl" % (tag or part))
     run(part=part, out=out, extra=extra)
     return out
+
+
+# 大装配体导出: 只用【包围盒】结论, 所以换成 SIMPLE 截面 —— 它是真模型的超集,
+# bbox 完全一致, 但 CGAL 快很多 (详细 2020/3030 轮廓会让 STL 导出几十倍变慢)
+# bench 再关掉 400 孔洞洞板: 它对整台包围盒没贡献, 且已在 [7] 单独验过
+SIMPLE_X = ("SIMPLE=true",)
+BENCH_X = ("SIMPLE=true", "PEGBOARD_ON=false")
 
 
 def probe(part, box, tag, simple=True):
@@ -150,7 +195,7 @@ PEG_NX, PEG_NZ, PEG_T, PEG_H, PEG_W, PEG_Z0 = [float(x) for x in C["PEG"]]
  BOT_T, COR20, DRW_FCLR) = [float(x) for x in C["DRW"]]
 ZF = [float(x) for x in C["DRWZ"][:3]]          # 三层面板下沿
 ZB = [float(x) for x in C["DRWZ"][3:]]          # 三个 2020 框下沿
-CAB_X0, CAB_X1, CAB_Z0, E20 = [float(x) for x in C["X20"]]
+CAB_X0, CAB_X1, CAB_Z0, E20, DRW_Y0 = [float(x) for x in C["X20"]]
 A20 = float(C["A20"][0])
 L20 = float(C["L20"][0])
 (CAST_H, CAST_PL, CAST_BS, CAST_BD, CAST_W, CAST_T) = [float(x) for x in C["CAST"]]
@@ -237,7 +282,7 @@ chk("立柱下端面 z = %.0f = 福马轮顶面 (型材确实截短了)" % Z_BOT
 
 # ---------------------------------------------------------------- 3
 print("\n[3] 整台包围盒")
-v, mn, mx, nf = measure(export("bench"))
+v, mn, mx, nf = measure(export("bench", extra=BENCH_X))
 chk("工作台 bbox = %.0f x %.0f(含拉手 %.0f) x %.0f" % (W, D + HANDLE_OUT, HANDLE_OUT, H),
     np.allclose(mx - mn, [W, D + HANDLE_OUT, H], atol=0.02),
     "实测 %.1f x %.1f x %.1f" % tuple(mx - mn))
@@ -246,7 +291,7 @@ chk("台体前沿仍贴 y=0, 拉手突出 %.0f" % HANDLE_OUT,
     abs(mx[1] - D) < 0.02 and abs(mn[1] + HANDLE_OUT) < 0.02,
     "y %.1f..%.1f" % (mn[1], mx[1]))
 
-v, mn, mx, nf = measure(export("casters"))
+v, mn, mx, nf = measure(export("casters", extra=SIMPLE_X))
 chk("福马轮 bbox = %.0f x %.0f x %.0f (不超出台体外沿)" % (W, D, CAST_H),
     np.allclose(mx - mn, [W, D, CAST_H], atol=0.02),
     "实测 %.1f x %.1f x %.1f" % tuple(mx - mn))
@@ -288,58 +333,62 @@ if not QUICK:
     v = probe("structure", box_cav, "cavity")
     chk("空腔 540 x 340 x 620 内无料 (0)", v < 1, "实测 %.1f mm^3  %s"
         % (v, box_cav))
-    # 负向 1: 往下探到地台板 -> 必须有料 (=538*338*15)
-    e = 538 * 338 * 15
-    v = probe("structure", [31, 31, 15, 538, 338, 30], "cav_floor")
+    # 负向 1: 往下探到地台板 -> 必须有料 (538*338*16, 地台板 18 厚)
+    e = 538 * 338 * 16
+    v = probe("structure", [31, 31, Z_FLOOR - PANEL_T + 1, 538, 338, PANEL_T - 2],
+              "cav_floor")
     chk("  负向: 探到地台板应有 %.0f" % e, near(v, e, 0.002), "实测 %.0f" % v)
     # 负向 2: 往上探到台面板 -> 必须有料 (=538*338*18)
     e = 538 * 338 * 18
     v = probe("structure", [31, 31, 640, 538, 338, 60], "cav_top")
     chk("  负向: 探到台面板应有 %.0f" % e, near(v, e, 0.002), "实测 %.0f" % v)
-    # 负向 3: 往右探到分隔封板 -> 必须有料 (=18*338*620)
-    e = 18 * 338 * 620
-    v = probe("structure", [X_CAV1 + 0.1, 31, 31, 29, 338, 620], "cav_div")
+    # 负向 3: 往右探到分隔封板 -> 必须有料 (18*338*(Z_RAIL-Z_FLOOR-2))
+    e = 18 * 338 * (Z_RAIL - Z_FLOOR - 2)
+    v = probe("structure", [X_CAV1 + 0.1, 31, Z_FLOOR + 1, 29, 338,
+                            Z_RAIL - Z_FLOOR - 2], "cav_div")
     chk("  负向: 探到右侧隔板应有 %.0f" % e, near(v, e, 0.002), "实测 %.0f" % v)
-    v = probe("structure", [500, 31, 31, 69, 338, 620], "cav_free")
+    v = probe("structure", [500, 31, Z_FLOOR + 1, 69, 338, Z_RAIL - Z_FLOOR - 2],
+              "cav_free")
     chk("  空腔右边缘确实在 x=570 (500..569 内无料)", v < 1, "实测 %.1f" % v)
 
 # ---------------------------------------------------------------- 6
 print("\n[6] 右侧抽屉单元 (3030 外框 + 2020 抽屉框/滑轨梁 + 三节滑轨)")
 if not QUICK:
     CAV_W = CAB_X1 - CAB_X0                       # 240 柜口宽
-    CAV_D = (D - P) - P                           # 340 柜口深 (前后立柱内侧之间)
-    # --- 柜口空腔 (地台板顶面 .. 台面框底面) 必须空 ---
-    box = [CAB_X0 + 1, P + 1, CAB_Z0 + CAB_T + 1,
-           CAV_W - 2, CAV_D - 2, CAB_H - (CAB_Z0 + CAB_T) - 2]
-    v = probe("structure", box, "cab_open")
-    chk("柜口 %.0f x %.0f x %.0f 内无料 (0)"
-        % (CAV_W - 2, CAV_D - 2, CAB_H - (CAB_Z0 + CAB_T) - 2), v < 1,
+    Y_BACK = D - P - CAB_T                        # 352 背板前表面
+    Z_OPEN = CAB_Z0 + CAB_T                       # 119 抽屉区地板(地台板顶面)
+    # --- 柜口空腔 (地台板顶面 .. 台面框底面, 背板之前) 必须空 ---
+    bw, bd, bh = CAV_W - 2, (Y_BACK - 1) - (P + 1), CAB_H - Z_OPEN - 2
+    v = probe("structure", [CAB_X0 + 1, P + 1, Z_OPEN + 1, bw, bd, bh], "cab_open")
+    chk("柜口 %.0f x %.0f x %.0f 内无料 (0)" % (bw, bd, bh), v < 1,
         "实测 %.1f" % v)
-    e = (CAV_W - 2) * CAV_D * CAB_T
-    v = probe("structure", [CAB_X0 + 1, P + 1, CAB_Z0 - 30, CAV_W - 2, CAV_D, 60],
+    # 负向: 柜地台板 (18mm 多层板, 只铺到背板前) 与 柜背板
+    e = (CAV_W - 4) * (CAB_ZD - 4) * CAB_T
+    v = probe("structure", [CAB_X0 + 2, P + 2, CAB_Z0 - 30, CAV_W - 4, CAB_ZD - 4, 60],
               "cab_floor")
     chk("  负向: 探到柜地台板应有 %.0f" % e, near(v, e, 0.002), "实测 %.0f" % v)
-    e = (CAV_W - 2) * CAB_T * (CAB_H - CAB_Z0 - 32)
-    v = probe("structure", [CAB_X0 + 1, D - P - CAB_T - 1, CAB_Z0 + 30,
-                            CAV_W - 2, CAB_T + 2, CAB_H - CAB_Z0 - 32], "cab_back")
+    e = (CAV_W - 4) * (CAB_T - 2) * 391
+    v = probe("structure", [CAB_X0 + 2, Y_BACK + 1, CAB_Z0 + 20, CAV_W - 4, CAB_T - 2, 391],
+              "cab_back")
     chk("  负向: 探到柜背板应有 %.0f" % e, near(v, e, 0.002), "实测 %.0f" % v)
     v = probe("structure", [CAB_X0 - 10.1, 1, CAB_Z0 + 30, 5, 28, 300], "cab_post")
     chk("  负向: 往左 10mm 撞上 3030 柜柱", v > 1e4, "实测 %.0f" % v)
 
-    # --- 2020 (抽屉框 + 滑轨梁) 体积 = 总长 x 截面 ---
-    v, mn, mx, nf = measure(export("drw20"))
-    chk("2020 体积 = %.1f m x %.3f mm^2" % (L20 / 1000, A20),
-        near(v, L20 * A20, 0.008),
-        "实测 %.5g, 理论 %.5g, %+.3f%%"
-        % (v, L20 * A20, (v - L20 * A20) / (L20 * A20) * 100))
+    # --- 2020 (抽屉框 + 滑轨梁) 用 SIMPLE 截面导出: 只验件数/总长,
+    #     真实 T 槽截面积已由 [1b] 的 beam20 单独校过 ---
+    v, mn, mx, nf = measure(export("drw20", extra=SIMPLE_X))
+    e = L20 * E20 * E20
+    chk("2020 总长 %.0f mm -> 体积 %.5g (18 根件全在)" % (L20, e),
+        near(v, e, 0.004), "实测 %.5g, %+.3f%%" % (v, (v - e) / e * 100))
     chk("2020 bbox = %.0f x %.0f x %.1f (滑轨梁撑满柜口宽深)"
         % (CAV_W, (D - P) - DRW_Y0, ZB[2] + DRW_BH - ZB[0]),
         np.allclose(mx - mn, [CAV_W, (D - P) - DRW_Y0, ZB[2] + DRW_BH - ZB[0]],
                     atol=0.02),
         "实测 %.1f x %.1f x %.1f" % tuple(mx - mn))
     xr = CAB_X0 + E20                                  # 1150 滑轨梁内侧面
-    v = probe("drw20", [xr + 1, 40, 130, SLIDE_T + SLIDE_CLR - 2, 300, 360], "drw_gap")
-    chk("  抽屉框让开了滑轨位置 (%.1fmm 空隙内无料)" % (SLIDE_T + SLIDE_CLR - 2),
+    v = probe("drw20", [xr + 0.3, SLIDE_Y0, ZB[0] + SLIDE_DZ,
+                        SLIDE_CLR - 0.6, SLIDE_L, SLIDE_H], "drw_gap")
+    chk("  抽屉框让开了滑轨位置 (%.1fmm 缝隙内无料)" % (SLIDE_CLR - 0.6),
         v < 1, "实测 %.1f" % v)
     v = probe("drw20", [CAB_X0 + E20/2 - 3, 100, ZB[0] + SLIDE_DZ + SLIDE_H/2 - 3,
                         6, 6, 6], "rail_in")
@@ -351,18 +400,19 @@ if not QUICK:
     e = 6 * SLIDE_T * SLIDE_L * SLIDE_H
     chk("6 条三节滑轨 = %.0f (每条 %.1f x %.0f x %.0f)"
         % (e, SLIDE_T, SLIDE_L, SLIDE_H), near(v, e, 0.002), "实测 %.0f" % v)
-    v = probe("slides", [CAB_X0 + E20 + 1, SLIDE_Y0 - 4, 130, 40, SLIDE_L + 8, 365],
+    v = probe("slides", [CAB_X0 + E20 + SLIDE_T + 2, SLIDE_Y0, 130, 40, SLIDE_L, 365],
               "sl_free")
-    chk("  负向: 抽屉框位置(离左滑轨 20mm)没滑轨", v < 1, "实测 %.1f" % v)
+    chk("  负向: 滑轨只占 %.1fmm (抽屉框那 40mm 处没滑轨)" % SLIDE_T, v < 1,
+        "实测 %.1f" % v)
 
     # --- 面板 / 角块 / 底板 ---
-    v = probe("drawers", [1150, 0.5, 0, 200, PANEL_T - 1, 600], "drw_front")
-    e = 200 * (PANEL_T - 1) * NDRW * DRW_FH
-    chk("%d 块抽屉面板 = %.0f" % (NDRW, e), near(v, e, 0.003), "实测 %.0f" % v)
-    e = 236 * (PANEL_T - 1) * NDRW * DRW_FH
-    v = probe("drawers", [1131.5, 0.5, 0, 236, PANEL_T - 1, 600], "drw_front_w")
-    chk("  面板宽 %.1f (嵌在柜口里, 前面与 3030 齐平)" % DRW_W,
-        near(v, e, 0.003), "实测 %.0f" % v)
+    v = probe("drawers", [CAB_X0 + 2, 0.5, 0, CAV_W - 4, PANEL_T - 1, 600], "drw_front")
+    e = (CAV_W - 4) * (PANEL_T - 1) * NDRW * DRW_FH
+    chk("%d 块抽屉面板 (%.1f x %.0f x %.2f) = %.0f"
+        % (NDRW, DRW_W, PANEL_T, DRW_FH, e), near(v, e, 0.002), "实测 %.0f" % v)
+    v = probe("drawers", [CAB_X1 - 0.8, 0.5, 0, 0.6, PANEL_T - 1, 600], "drw_nowide")
+    chk("  面板宽确实只有 %.1f (右边 0.8mm 是缝, 不与 3030 相碰)" % DRW_W,
+        v < 1, "实测 %.1f" % v)
     v = probe("drawers", [1150, 0.5, ZF[0] + DRW_FH + 0.5, 200, PANEL_T - 1, 2], "drw_gapz")
     chk("  负向: 第 1/2 层面板缝 (%.1f..%.1f) 里没料" % (ZF[0] + DRW_FH, ZF[1]),
         v < 1, "实测 %.1f" % v)
@@ -418,8 +468,8 @@ if not QUICK:
     v = probe("casters", [14, 14, CAST_H - CAST_T + 1, 27, 27, CAST_T - 2], "cast_plate")
     e = 27 * 27 * (CAST_T - 2)
     chk("左前脚底板 (远离 4 个安装孔) = %.0f" % e, near(v, e, 0.002), "实测 %.0f" % v)
-    v = probe("casters", [3, 3, CAST_H - CAST_T + 1, 7, 7, CAST_T - 2], "cast_hole")
-    chk("  负向: 底板安装孔 D9 已开出来 (孔位处没料)", v < 1, "实测 %.1f" % v)
+    v = probe("casters", [4, 4, CAST_H - CAST_T + 1, 5, 5, CAST_T - 2], "cast_hole")
+    chk("  负向: 底板安装孔 D9 已开出来 (孔内 5x5 无料)", v < 1, "实测 %.1f" % v)
     v = probe("casters", [20.5 - 5, 27.5 - 5, 21, 10, 10, 10], "cast_wheel")
     chk("  左前轮内部 10x10x10 实心 (轮 D%.0f x %.0f)" % (CAST_BD, CAST_W),
         near(v, 1000, 0.002), "实测 %.0f" % v)
@@ -442,6 +492,8 @@ print("结果: %d / %d 通过" % (ok, len(_RESULT)))
 for nm, r in _RESULT:
     if not r:
         print("   FAIL: " + nm)
+if CGAL_BAD:
+    print("   ⚠ 以下 part 出现过 CGAL 异常, 结果不可信: %s" % sorted(set(CGAL_BAD)))
 print("=" * 74)
 
 if MAKE_PNG:
